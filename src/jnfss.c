@@ -80,9 +80,6 @@ bool createFS(const char* filepath, const char* volLabel) {
     memset(bootsect->JumpInst, 0x00, 3);
     bootsect->rootDIREntries = DEFAULT_ROOT_DIR_ENTRIES;
 
-    const char* t = "Test";
-    fwrite(t, sizeof(t), 1, disk);
-
     fseek(disk, 0, SEEK_END);
     long size = ftell(disk);
     rewind(disk);
@@ -111,48 +108,7 @@ bool createFS(const char* filepath, const char* volLabel) {
     return true;
 }
 
-bool mountFS(const char* filepath) {
-    if (mounted == true) return false;
-
-    FILE* disk = fopen(filepath, "rb");
-    if (!disk) {
-        printf("ERROR: Unable to open disk [%s]\n\n", filepath);
-        return false;
-    }
-
-    bootsect = (bootsector_t*)malloc(sizeof(bootsector_t));
-    if (!readBootsector(disk)) {
-        printf("ERROR: Unable to read bootsector\n\n");
-        return false;
-    }
-
-    for (int i = 0; i < 8; i++) {
-        if (bootsect->systemID[i] != systemID[i]) {
-            printf("ERROR: Unknown Filesystem\n\n");
-            return false;
-        }
-    }
-
-    records = (record_t*)malloc(sizeof(record_t) * bootsect->rootDIREntries);
-    if (!readRecords(disk)) {
-        printf("ERROR: Unable to read records\n\n");
-        return false;
-    }
-    
-    sectorsPerRecord = (bootsect->rootDIREntries * SECTOR_SIZE) / 16;
-    totalDiskBlocks = bootsect->totalSectors - ((bootsect->rootDIREntries / 16) + 1);
-
-    diskblock = (diskblock_t*)malloc(sizeof(diskblock_t) * totalDiskBlocks);
-    if (!readDiskBlocks(disk)) {
-        printf("ERROR: Unable to disk blocks\n\n");
-        return false;
-    }
-
-    fclose(disk);
-
-    mounted = true;
-    return true;
-}
+bool mountFS(const char* filepath);             //WIP
 
 bool syncFS(const char* filepath) {
     if (mounted == false) return false;
@@ -208,7 +164,19 @@ void printFSInfo() {
     printf("Volume Label: ");
     for(int i = 0; i < 11; i++)
         printf("%c", (char)bootsect->volumeLabel[i]);
-    printf("\n\n");
+
+    int freeBytes;
+    int usedBytes;
+    for (int i = 0; i < totalDiskBlocks; i++) {
+        if (diskblock[i].allocated == 0x00)
+            freeBytes += SECTOR_SIZE;
+        if (diskblock[i].allocated == 0xFE)
+            usedBytes += SECTOR_SIZE;
+        freeBytes = i;
+    }
+
+    printf("\nFree Bytes: %d Bytes [%d KB]\n", freeBytes, freeBytes / 1024);
+    printf("Used Bytes: %d Bytes [%d KB]\n\n", usedBytes, usedBytes / 1024);
 
     char* name = (char*)malloc(10 * sizeof(char));
     char* type = (char*)malloc(3 * sizeof(char));
@@ -225,8 +193,12 @@ void printFSInfo() {
             printf("Record No.: %d\n", i);
             printf("Name: %s\n", name);
             printf("Filetype: %s\n", type);
+
             printf("Date Created: %d/%d/%d - %d:%d:%d\n", (uint8_t)((records[i].dateCreated >> 5) & 0x0F), (uint8_t)(records[i].dateCreated & 0x1F), (uint16_t)((records[i].dateCreated >> 8) & 0xFFFF), records[i].timeCreated[0], records[i].timeCreated[1], records[i].timeCreated[2]);
             printf("Date Modified: %d/%d/%d - %d:%d:%d\n", (uint8_t)((records[i].dateModified >> 5) & 0x0F), (uint8_t)(records[i].dateModified & 0x1F), (uint16_t)((records[i].dateModified >> 8) & 0xFFFF), records[i].timeModified[0], records[i].timeModified[1], records[i].timeModified[2]);
+
+            printf("First Block No.: %d\n", records[i].firstBlock);
+
             printf("Size: %d Bytes\n\n", records[i].size);
         }
     }
@@ -299,12 +271,8 @@ int makeRecord(const char* name, const char* filetype) {
     return emptyRecord;
 }
 
-int extendBlock(const char* filename, uint16_t count) {
-    if (mounted == false || count == 0) return 1;
-    if (strlen(filename) > 10) {
-        printf("ERROR: Filename Overflow [%s]\n\n", filename);
-        return -1;
-    }
+int findRecord(const char* filename) {
+    if (strlen(filename) > 10) return -2;
 
     int recordNum = -1;
     char* name = (char*)malloc(10 * sizeof(char));
@@ -317,10 +285,42 @@ int extendBlock(const char* filename, uint16_t count) {
     }
     free(name);
 
-    if (recordNum == -1) {
-        printf("ERROR: File not found [%s]\n\n", filename);
-        return -2;
+    if (recordNum == -1 || records[recordNum].allocated == 0x00) return -3;
+
+    return recordNum;
+}
+
+int removeRecord(const char* filename) {
+    if (mounted == false) return -1;
+
+    int recordNum = findRecord(filename);
+    if (recordNum == -2 || recordNum == -3) return recordNum;
+    int count = records[recordNum].size / SECTOR_SIZE;
+
+    bool firstBlock = true;
+    int block;
+    while (true) {
+        if (firstBlock) {
+            block = records[recordNum].firstBlock;
+            firstBlock = false;
+        } else block = diskblock[block].nextBlock;
+
+        diskblock[block].allocated = 0x00;
+        count--;
+
+        if (count == 0) break;
     }
+
+    records[recordNum].allocated = 0x00;
+
+    return 0;
+}
+
+int extendBlock(const char* filename, uint16_t count) {
+    if (mounted == false || count == 0) return -1;
+
+    int recordNum = findRecord(filename);
+    if (recordNum == -2 || recordNum == -3) return recordNum;
 
     int recordAddSize = count * SECTOR_SIZE;
 
@@ -346,8 +346,98 @@ int extendBlock(const char* filename, uint16_t count) {
 
         if (count == 0) break;
     }
-
     records[recordNum].size += recordAddSize;
+
+    return 0;
+}
+
+int* readData(const char* filename, uint16_t size, uint16_t startBlock, uint16_t startByte) {
+    if (mounted == false) return (int*)-1;
+    
+    int recordNum = findRecord(filename);
+    if (recordNum < 0) {
+        int* returnErr = &recordNum;
+        return returnErr;
+    }
+
+    uint8_t* buffer = (uint8_t*)malloc(((size - startByte) * 2) * sizeof(uint8_t));  
+    if (!buffer) return (int*)-4;
+
+    int count = size / 509;
+
+    int block;
+    int lastPos = 0;
+    bool startFinish = false;
+    while (true) {
+        if (startBlock == 0 && !startFinish) {
+            block = records[recordNum].firstBlock;
+            startFinish = true;
+        } else block = diskblock[block].nextBlock;
+
+        int start = (startByte != 0) ? startByte : 0;
+        startByte = 0;
+
+        if (diskblock[block].allocated == 0xFE) {
+            for (int i = start; i < 509; i++) {
+                buffer[lastPos] = diskblock[block].data[i];
+                lastPos++;
+            }
+        }
+
+        if (count == 0) break;
+        count--;
+    }
+
+    return (int*)buffer;
+}
+
+int fillData(const char* filename, void* buffer, uint16_t size, uint16_t startBlock, uint16_t startByte) {
+    if (mounted == false) return -1;
+    
+    int recordNum = findRecord(filename);
+    if (recordNum == -2 || recordNum == -3) return recordNum;
+
+    uint8_t* u8Buffer = (uint8_t*)malloc(size * sizeof(uint8_t));
+    if (!buffer) return -4;
+    memset(u8Buffer, 0x00, size);
+    memcpy(u8Buffer, buffer, size);
+
+    int count = size / 509;
+
+    int block;
+    int lastPos = 0;
+    bool startFinish = false;
+    while (true) {
+        if (startBlock == 0 && !startFinish) {
+            block = records[recordNum].firstBlock;
+            startFinish = true;
+        } else block = diskblock[block].nextBlock;
+
+        int start = (startByte != 0) ? startByte : 0;
+        startByte = 0;
+
+        if (diskblock[block].allocated == 0xFE) {
+            for (int i = start; i < 509; i++) {
+                diskblock[block].data[i] = u8Buffer[lastPos];
+                lastPos++;
+            }
+        }
+
+        if (count == 0) break;
+        count--;
+    }
+
+    return 0;
+}
+
+int renameFile(const char* oldFilename, const char* newFilename) {
+    if (strlen(newFilename) > 10) return -1;
+
+    int recordNum = findRecord(oldFilename);
+    if (recordNum == -2 || recordNum == -3) return recordNum;
+
+    for (int i = 0; i < 10; i++)
+        records[recordNum].name[i] = (uint8_t)newFilename[i];
 
     return 0;
 }
