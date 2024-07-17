@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "jnfss.h"
+#include "../src/jnfss.h"
 
 bool mount;
 void getFile(const char* filename, long filesize) {
@@ -50,7 +50,7 @@ int main(int argc, char* argv[]) {
 
         createFS(argv[3], volName);
         makeRecord("WINXP     ", "JPG");
-        extendBlock("WINXP     ", filesize / 509);
+        extendRecord("WINXP     ", filesize / 509);
 
         free(volName);
     } else {

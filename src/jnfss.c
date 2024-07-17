@@ -49,19 +49,6 @@ bool mounted = false;
 
 uint8_t systemID[] = {0x4A, 0x4E, 0x46, 0x53, 0x53, 0x20, 0x20, 0x20};
 
-bool readBootsector(FILE* disk) {
-    return fread(bootsect, sizeof(bootsector_t), 1, disk);
-}
-
-bool readRecords(FILE* disk) {
-    return fread(records, sizeof(record_t), bootsect->rootDIREntries, disk);
-}
-
-bool readDiskBlocks(FILE* disk) {
-    fseek(disk, sectorsPerRecord + SECTOR_SIZE, SEEK_SET);
-    return fread(diskblock, sizeof(diskblock_t), totalDiskBlocks, disk);
-}
-
 bool createFS(const char* filepath, const char* volLabel) {
     if (mounted == true) return false;
 
@@ -108,7 +95,9 @@ bool createFS(const char* filepath, const char* volLabel) {
     return true;
 }
 
-bool mountFS(const char* filepath);             //WIP
+bool mountFS(const char* filepath) {
+    return false;                                   // WIP
+}
 
 bool syncFS(const char* filepath) {
     if (mounted == false) return false;
@@ -316,7 +305,7 @@ int removeRecord(const char* filename) {
     return 0;
 }
 
-int extendBlock(const char* filename, uint16_t count) {
+int extendRecord(const char* filename, uint16_t count) {
     if (mounted == false || count == 0) return -1;
 
     int recordNum = findRecord(filename);
