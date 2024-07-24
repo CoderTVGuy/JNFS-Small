@@ -64,6 +64,11 @@ bool createFS(const char* filepath, const char* volLabel) {
     }
 
     bootsect = (bootsector_t*)malloc(sizeof(bootsector_t));
+    if (!bootsect) {
+        printf("ERROR: Unable to allocate memory for bootsector\n\n");
+        return false;
+    }
+
     memset(bootsect->JumpInst, 0x00, 3);
     bootsect->rootDIREntries = DEFAULT_ROOT_DIR_ENTRIES;
 
@@ -79,13 +84,26 @@ bool createFS(const char* filepath, const char* volLabel) {
         bootsect->volumeLabel[i] = (uint8_t)volLabel[i];
 
     records = (record_t*)malloc(bootsect->rootDIREntries * sizeof(record_t));
+    if (!records) {
+        printf("ERROR: Unable to allocate memory for records -> [Required: %ld]\n\n", bootsect->rootDIREntries * sizeof(record_t));
+        free(bootsect);
+        return false;
+    }
+
     for (int i = 0; i < bootsect->rootDIREntries; i++)
         memset(&records[i], 0x00, sizeof(record_t));
 
     sectorsPerRecord = (bootsect->rootDIREntries * SECTOR_SIZE) / 16;
     totalDiskBlocks = bootsect->totalSectors - ((bootsect->rootDIREntries / 16) + 1);
 
-    diskblock = (diskblock_t*)malloc(sizeof(diskblock_t) * totalDiskBlocks);
+    diskblock = (diskblock_t*)malloc(totalDiskBlocks * sizeof(diskblock_t));
+    if (!diskblock) {
+        printf("ERROR: Unable to allocate memory for diskblocks -> [Required: %d]\n\n", totalDiskBlocks);
+        free(bootsect);
+        free(records);
+        return false;
+    }
+
     for (int i = 0; i < totalDiskBlocks; i++)
         memset(&diskblock[i], 0x00, sizeof(diskblock_t));
 
@@ -96,7 +114,55 @@ bool createFS(const char* filepath, const char* volLabel) {
 }
 
 bool mountFS(const char* filepath) {
-    return false;                                   // WIP
+    if (mounted == true) return false;
+
+    FILE* disk = fopen(filepath, "rb");
+    if (!disk) {
+        printf("ERROR: Unable to open disk [%s]\n\n", filepath);
+        return false;
+    }
+    
+    bootsect = (bootsector_t*)malloc(sizeof(bootsector_t));
+    if (!bootsect) {
+        printf("ERROR: Unable to allocate memory for bootsector\n\n");
+        return false;
+    } if (fread(bootsect, sizeof(bootsector_t), 1, disk) != 1) {
+        printf("ERROR: Unable to read bootsector\n\n");
+        free(bootsect);
+        return false;
+    }
+
+    fseek(disk, SECTOR_SIZE, SEEK_SET);
+    records = (record_t*)malloc(bootsect->rootDIREntries * sizeof(record_t));
+    if (!records) {
+        printf("ERROR: Unable to allocate memory for records\n\n");
+        return false;
+    } if (fread(records, sizeof(record_t), bootsect->rootDIREntries, disk) != bootsect->rootDIREntries) {
+        printf("ERROR: Unable to read records\n\n");
+        free(bootsect);
+        free(records);
+        return false;
+    }
+
+    sectorsPerRecord = (bootsect->rootDIREntries * SECTOR_SIZE) / 16;
+    totalDiskBlocks = bootsect->totalSectors - ((bootsect->rootDIREntries / 16) + 1);
+
+    fseek(disk, sectorsPerRecord + SECTOR_SIZE, SEEK_SET);
+    diskblock = (diskblock_t*)malloc(totalDiskBlocks * sizeof(diskblock_t));
+    if (!diskblock) {
+        printf("ERROR: Unable to allocate memory for disk blocks\n\n");
+        return false;
+    } if (fread(diskblock, sizeof(diskblock_t), totalDiskBlocks, disk) != totalDiskBlocks) {
+        printf("ERROR: Unable to read disk blocks\n\n");
+        free(bootsect);
+        free(records);
+        free(diskblock);
+        return false;
+    }
+
+    mounted = true;
+
+    return true;
 }
 
 bool syncFS(const char* filepath) {
@@ -110,6 +176,7 @@ bool syncFS(const char* filepath) {
 
     fseek(disk, 0, SEEK_SET);
     fwrite(bootsect, sizeof(bootsector_t), 1, disk);
+
     fseek(disk, SECTOR_SIZE, SEEK_SET);
     for (int i = 0; i < bootsect->rootDIREntries; i++)
         fwrite(&records[i], sizeof(record_t), 1, disk);
@@ -154,30 +221,19 @@ void printFSInfo() {
     for(int i = 0; i < 11; i++)
         printf("%c", (char)bootsect->volumeLabel[i]);
 
-    int freeBytes;
-    int usedBytes;
-    for (int i = 0; i < totalDiskBlocks; i++) {
-        if (diskblock[i].allocated == 0x00)
-            freeBytes += SECTOR_SIZE;
-        if (diskblock[i].allocated == 0xFE)
-            usedBytes += SECTOR_SIZE;
-        freeBytes = i;
-    }
+    printf("\n\n");
 
-    printf("\nFree Bytes: %d Bytes [%d KB]\n", freeBytes, freeBytes / 1024);
-    printf("Used Bytes: %d Bytes [%d KB]\n\n", usedBytes, usedBytes / 1024);
-
-    char* name = (char*)malloc(10 * sizeof(char));
-    char* type = (char*)malloc(3 * sizeof(char));
+    char* name = (char*)malloc(11 * sizeof(char));
+    char* type = (char*)malloc(4 * sizeof(char));
 
     printf("[Record Info]: \n");
     for (int i = 0; i < bootsect->rootDIREntries; i++) {
         for (int j = 0; j < 10; j++)
             name[j] = records[i].name[j];
-        name[11 - 1] = '\0';
+        name[10] = '\0';
         for (int j = 0; j < 3; j++)
             type[j] = records[i].filetype[j];
-        type[4 - 1] = '\0';
+        type[3] = '\0';
         if (records[i].allocated == 0xFE) {
             printf("Record No.: %d\n", i);
             printf("Name: %s\n", name);
@@ -191,6 +247,9 @@ void printFSInfo() {
             printf("Size: %d Bytes\n\n", records[i].size);
         }
     }
+
+    free(name);
+    free(type);
 }
 
 int findEmptyRecord() {
@@ -264,12 +323,13 @@ int findRecord(const char* filename) {
     if (strlen(filename) > 10) return -2;
 
     int recordNum = -1;
-    char* name = (char*)malloc(10 * sizeof(char));
+    char* name = (char*)malloc(11 * sizeof(char));
+
     for (int i = 0; i < bootsect->rootDIREntries; i++) {
-        memset(name, 0x00, 10);
+        memset(name, 0x00, 11);
         for (int j = 0; j < 10; j++)
             name[j] = records[i].name[j];
-        name[11 - 1] = '\0';
+        name[10] = '\0';
         if (strcmp(filename, name) == 0) { recordNum = i; break; }
     }
     free(name);
@@ -415,6 +475,8 @@ int fillData(const char* filename, void* buffer, uint16_t size, uint16_t startBl
         if (count == 0) break;
         count--;
     }
+
+    free(u8Buffer);
 
     return 0;
 }
